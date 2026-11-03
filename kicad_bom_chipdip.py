@@ -218,37 +218,70 @@ def write_csv(path: Path, headers: Sequence[str], rows: Sequence[Sequence[object
         writer.writerows(rows)
 
 
+def search_query(item: BomItem) -> str:
+    """Build an *unverified* ChipDip search phrase, never an invented MPN.
+
+    The complete search export is a checklist for catalogue lookup, not a
+    purchase-ready cart. Full source fields stay in *_review.csv.
+    """
+    if item.part:
+        return validate_part(item.part)
+    value = validate_part(item.value)
+    footprint = item.footprint.split(":", 1)[-1].strip()
+    package = package_code(item.footprint)
+    family_match = re.match(r"[A-Za-z]+", item.reference)
+    family = family_match.group(0).upper() if family_match else ""
+    if package and family in {"R", "C", "L", "Y"}:
+        # Value + 0805/1206 is sufficient to start catalogue searching; it
+        # does not imply voltage/power/tolerance are known.
+        return validate_part(f"{value} {package}")
+    readable_footprint = re.sub(r"[_]+", " ", footprint)
+    if readable_footprint and family in {"J", "TP"}:
+        # J labels typically name a net (CAN, POWER, etc), not the product.
+        return validate_part(readable_footprint)
+    if readable_footprint and value:
+        return validate_part(f"{value} {readable_footprint}")
+    return validate_part(value or readable_footprint or item.reference)
+
+
 def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
                   dest: Path, include_nominals: bool) -> Dict[str, Path]:
     dest.mkdir(parents=True, exist_ok=True)
     stem = source.stem
     paths = {
         "chipdip": dest / f"{stem}_chipdip.txt",
+        "candidates": dest / f"{stem}_chipdip_candidates_only.txt",
         "review": dest / f"{stem}_review.csv",
         "mapping": dest / f"{stem}_mapping_template.csv",
         "summary": dest / f"{stem}_summary.txt",
     }
-    grouped: OrderedDict[str, Tuple[str, int]] = OrderedDict()
-    for item in items:
-        if not item.part:
-            continue
-        key = SPACES.sub(" ", item.part).casefold()
-        if key in grouped:
-            name, qty = grouped[key]
-            grouped[key] = (name, qty + item.qty)
-        else:
-            grouped[key] = (item.part, item.qty)
-    with paths["chipdip"].open("w", encoding="utf-8", newline="\n") as stream:
-        for part, qty in grouped.values():
-            stream.write(f"{part}\t{qty}\n")
+    def group_queries(entries: List[Tuple[str, int]]) -> OrderedDict[str, Tuple[str, int]]:
+        grouped: OrderedDict[str, Tuple[str, int]] = OrderedDict()
+        for phrase, quantity in entries:
+            key = SPACES.sub(" ", phrase).casefold()
+            if key in grouped:
+                name, total = grouped[key]
+                grouped[key] = (name, total + quantity)
+            else:
+                grouped[key] = (phrase, quantity)
+        return grouped
+
+    all_queries = group_queries([(search_query(item), item.qty) for item in items])
+    candidate_queries = group_queries([(item.part, item.qty) for item in items if item.part])
+    for label, grouped in (("chipdip", all_queries), ("candidates", candidate_queries)):
+        with paths[label].open("w", encoding="utf-8", newline="\n") as stream:
+            for phrase, qty in grouped.values():
+                stream.write(f"{phrase}\t{qty}\n")
+    if sum(qty for _, qty in all_queries.values()) != sum(item.qty for item in items):
+        raise ValueError("Ошибка подсчета: итог полного TXT не совпадает с BOM")
 
     # Preserve every exported KiCad field in the review, including user-defined
     # columns (MP, MF, MANUFACTURER, Описание, etc). Unknown columns are harmless.
     source_columns = list(dict.fromkeys(key for item in items for key in item.source))
     write_csv(paths["review"],
-              ["Reference", "Qty (boards)", "Value", "Footprint", "PartNumber", "Status", "Reason"]
+              ["Reference", "Qty (boards)", "Value", "Footprint", "PartNumber", "Status", "Reason", "SearchQuery"]
               + [f"KiCad:{key}" for key in source_columns],
-              [[i.reference, i.qty, i.value, i.footprint, i.part, i.status, i.reason]
+              [[i.reference, i.qty, i.value, i.footprint, i.part, i.status, i.reason, search_query(i)]
                + [i.source.get(key, "") for key in source_columns] for i in items])
     if not paths["mapping"].exists():
         write_csv(paths["mapping"],
@@ -261,14 +294,20 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
         f"Источник: {source.name}",
         f"Строк BOM к установке: {len(items)}",
         f"Всего компонентов: {sum(i.qty for i in items)}",
-        f"Строк для вставки в ChipDip (после объединения): {len(grouped)}",
-        f"Количество включено в список: {sum(i.qty for i in items if i.part)}",
+        f"Поисковых строк в ПОЛНОМ TXT (после объединения): {len(all_queries)}",
+        f"Количество в полном TXT: {sum(qty for _, qty in all_queries.values())}",
+        f"Поисковых строк с распознанными артикулами: {len(candidate_queries)}",
+        f"Количество в списке кандидатов: {sum(i.qty for i in items if i.part)}",
         f"Точные артикулы из BOM: {counts['explicit']} шт.",
         f"Артикулы из сопоставления: {counts['mapped']} шт.",
         f"Кандидаты из Value (проверить): {counts['candidate']} шт.",
         f"Поиск по номиналам (не для слепого заказа): {counts['nominal_search']} шт.",
         f"Требуют подбора артикула: {counts['unresolved']} шт.",
         f"Поиск по номиналам разрешён: {'да' if include_nominals else 'нет'}",
+        "ВАЖНО: основной *_chipdip.txt включает ВСЕ позиции для ПОИСКА, в том числе",
+        "неоднозначные названия/номиналы. Это не подтвержденные товары ChipDip.",
+        "Список *_chipdip_candidates_only.txt содержит только найденные в BOM",
+        "артикулы и похожие обозначения (тоже требуют проверки по каталогу).",
         "ВАЖНО: Value не гарантирует точный MPN. Перед заказом проверьте производителя,",
         "корпус, параметры и допустимость замены для каждой позиции.",
     ]
