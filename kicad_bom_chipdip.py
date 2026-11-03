@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a grouped KiCad CSV BOM to a ChipDip paste-ready part list.
+"""Convert grouped KiCad BOM to safe ChipDip import and complete lookup checklist.
 
 Requires Python 3.9+. Uses only the Python standard library.
 """
@@ -251,6 +251,7 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
     paths = {
         "chipdip": dest / f"{stem}_chipdip.txt",
         "candidates": dest / f"{stem}_chipdip_candidates_only.txt",
+        "search": dest / f"{stem}_search_all.txt",
         "review": dest / f"{stem}_review.csv",
         "mapping": dest / f"{stem}_mapping_template.csv",
         "summary": dest / f"{stem}_summary.txt",
@@ -266,22 +267,36 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
                 grouped[key] = (phrase, quantity)
         return grouped
 
+    # The ChipDip bulk-import form expects part numbers, NOT descriptions or
+    # generic footprints. Import only explicit BOM MPNs or approved mappings.
+    upload_items = [item for item in items if item.status in {"explicit", "mapped"} and item.part]
+    candidate_items = [item for item in items if item.status == "candidate" and item.part]
+    upload_queries = group_queries([(item.part, item.qty) for item in upload_items])
+    candidate_queries = group_queries([(item.part, item.qty) for item in candidate_items])
     all_queries = group_queries([(search_query(item), item.qty) for item in items])
-    candidate_queries = group_queries([(item.part, item.qty) for item in items if item.part])
-    for label, grouped in (("chipdip", all_queries), ("candidates", candidate_queries)):
+    for label, grouped in (("chipdip", upload_queries),
+                           ("candidates", candidate_queries),
+                           ("search", all_queries)):
         with paths[label].open("w", encoding="utf-8", newline="\n") as stream:
             for phrase, qty in grouped.values():
                 stream.write(f"{phrase}\t{qty}\n")
-    if sum(qty for _, qty in all_queries.values()) != sum(item.qty for item in items):
-        raise ValueError("Ошибка подсчета: итог полного TXT не совпадает с BOM")
+    total_bom = sum(item.qty for item in items)
+    total_search = sum(qty for _, qty in all_queries.values())
+    if total_search != total_bom:
+        raise ValueError("Ошибка подсчета: итог поискового TXT не совпадает с BOM")
+    total_upload = sum(item.qty for item in upload_items)
+    total_candidates = sum(item.qty for item in candidate_items)
+    total_to_choose = total_bom - total_upload - total_candidates
+    if total_upload + total_candidates + total_to_choose != total_bom:
+        raise ValueError("Ошибка подсчета: не все компоненты отнесены к группе")
 
     # Preserve every exported KiCad field in the review, including user-defined
     # columns (MP, MF, MANUFACTURER, Описание, etc). Unknown columns are harmless.
     source_columns = list(dict.fromkeys(key for item in items for key in item.source))
     write_csv(paths["review"],
-              ["Reference", "Qty (boards)", "Value", "Footprint", "PartNumber", "Status", "Reason", "SearchQuery"]
+              ["Reference", "Qty (boards)", "Value", "Footprint", "PartNumber", "Status", "Reason", "SearchQuery", "ImportReady"]
               + [f"KiCad:{key}" for key in source_columns],
-              [[i.reference, i.qty, i.value, i.footprint, i.part, i.status, i.reason, search_query(i)]
+              [[i.reference, i.qty, i.value, i.footprint, i.part, i.status, i.reason, search_query(i), "yes" if i.status in {"explicit", "mapped"} and i.part else "no"]
                + [i.source.get(key, "") for key in source_columns] for i in items])
     if not paths["mapping"].exists():
         write_csv(paths["mapping"],
@@ -293,23 +308,24 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
     lines = [
         f"Источник: {source.name}",
         f"Строк BOM к установке: {len(items)}",
-        f"Всего компонентов: {sum(i.qty for i in items)}",
-        f"Поисковых строк в ПОЛНОМ TXT (после объединения): {len(all_queries)}",
-        f"Количество в полном TXT: {sum(qty for _, qty in all_queries.values())}",
-        f"Поисковых строк с распознанными артикулами: {len(candidate_queries)}",
-        f"Количество в списке кандидатов: {sum(i.qty for i in items if i.part)}",
-        f"Точные артикулы из BOM: {counts['explicit']} шт.",
-        f"Артикулы из сопоставления: {counts['mapped']} шт.",
-        f"Кандидаты из Value (проверить): {counts['candidate']} шт.",
-        f"Поиск по номиналам (не для слепого заказа): {counts['nominal_search']} шт.",
-        f"Требуют подбора артикула: {counts['unresolved']} шт.",
-        f"Поиск по номиналам разрешён: {'да' if include_nominals else 'нет'}",
-        "ВАЖНО: основной *_chipdip.txt включает ВСЕ позиции для ПОИСКА, в том числе",
-        "неоднозначные названия/номиналы. Это не подтвержденные товары ChipDip.",
-        "Список *_chipdip_candidates_only.txt содержит только найденные в BOM",
-        "артикулы и похожие обозначения (тоже требуют проверки по каталогу).",
-        "ВАЖНО: Value не гарантирует точный MPN. Перед заказом проверьте производителя,",
-        "корпус, параметры и допустимость замены для каждой позиции.",
+        f"Всего компонентов: {total_bom}",
+        f"Для импорта в ChipDip (*_chipdip.txt): {len(upload_queries)} артикулов, {total_upload} шт.",
+        f"Артикулы-кандидаты (*_chipdip_candidates_only.txt): {len(candidate_queries)} наименований, {total_candidates} шт.",
+        f"Нужен подбор артикула: {total_to_choose} шт.",
+        f"Полный поисковый список (*_search_all.txt): {len(all_queries)} строк, {total_search} шт.",
+        f"Артикулы из BOM (MP, MPN, ChipDip и др.): {counts['explicit']} шт.",
+        f"Артикулы из файла сопоставления: {counts['mapped']} шт.",
+        f"Названия из Value (непроверенные): {counts['candidate']} шт.",
+        f"Поисковые фразы по номиналу: {counts['nominal_search']} шт.",
+        f"Прочие позиции без MPN: {counts['unresolved']} шт.",
+        "",
+        "*_chipdip.txt: ТОЛЬКО явно заданные MPN / принятые сопоставления.",
+        "Даже они не проверены по наличию товара в каталоге ChipDip.",
+        "*_chipdip_candidates_only.txt: возможные артикулы; нужно проверить",
+        "производителя, конкретный вариант, корпус и характеристики.",
+        "*_search_all.txt: все компоненты и количества, но это НЕ файл для",
+        "импорта заказной спецификации в ChipDip: есть описания и номиналы.",
+        "Подтвердите артикулы в mapping_template.csv, затем повторите запуск с --mapping.",
     ]
     if warnings:
         lines.extend(["", "Предупреждения:", *["- " + w for w in warnings]])
