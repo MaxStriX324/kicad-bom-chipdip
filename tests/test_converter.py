@@ -42,7 +42,7 @@ class BomTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             paths = write_outputs(Path('test.csv'), items, warnings, Path(folder), False)
             self.assertEqual(paths['chipdip'].read_text(), '')
-            self.assertIn('1k 0805\t6', paths['search'].read_text())
+            self.assertIn('резистор SMD 1 кОм 0805\t6', paths['search'].read_text())
             self.assertEqual(paths['candidates'].read_text().strip(), 'AMC1301DWVR\t9')
             self.assertTrue(paths['mapping'].exists())
 
