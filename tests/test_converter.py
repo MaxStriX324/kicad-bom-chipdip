@@ -41,7 +41,9 @@ class BomTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         with tempfile.TemporaryDirectory() as folder:
             paths = write_outputs(Path('test.csv'), items, warnings, Path(folder), False)
-            self.assertEqual(paths['chipdip'].read_text(), '')
+            self.assertEqual(paths['chipdip'].read_text(), paths['search'].read_text())
+            self.assertIn('AMC1301DWVR\t9', paths['chipdip'].read_text())
+            self.assertEqual(paths['mpn_only'].read_text(), '')
             self.assertIn('резистор SMD 1 кОм 0805\t6', paths['search'].read_text())
             self.assertEqual(paths['candidates'].read_text().strip(), 'AMC1301DWVR\t9')
             self.assertTrue(paths['mapping'].exists())
@@ -59,6 +61,7 @@ class BomTests(unittest.TestCase):
             write_outputs(Path('foo.csv'), items, [], Path(folder), False)
             self.assertEqual(outputs['mapping'].read_text(), 'user edits')
             self.assertEqual(outputs['chipdip'].read_text().strip(), 'RES-ABC\t2')
+            self.assertEqual(outputs['mpn_only'].read_text().strip(), 'RES-ABC\t2')
 
     def test_kicad_csv_quoted_reference(self):
         with tempfile.TemporaryDirectory() as folder:
