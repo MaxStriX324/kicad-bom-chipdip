@@ -52,7 +52,8 @@ class SearchQualityTests(unittest.TestCase):
         self.assertEqual(review_note(items[1])[0], "high")
         with tempfile.TemporaryDirectory() as d:
             out = write_outputs(Path("Лаборатория (1).csv"), items, [], Path(d), False)
-            self.assertEqual(out["chipdip"].read_text(encoding="utf-8"), "AMC1301DWVR\t1\n")
+            self.assertEqual(out["mpn_only"].read_text(encoding="utf-8"), "AMC1301DWVR\t1\n")
+            self.assertEqual(out["chipdip"].read_text(encoding="utf-8"), out["search"].read_text(encoding="utf-8"))
             self.assertEqual(sum(int(line.rsplit("\t", 1)[1]) for line in out["search"].read_text(encoding="utf-8").splitlines()), 4)
             with out["needs_review"].open(encoding="utf-8-sig", newline="") as f:
                 rr = list(csv.DictReader(f, delimiter=";"))
