@@ -218,30 +218,144 @@ def write_csv(path: Path, headers: Sequence[str], rows: Sequence[Sequence[object
         writer.writerows(rows)
 
 
-def search_query(item: BomItem) -> str:
-    """Build an *unverified* ChipDip search phrase, never an invented MPN.
+def family_of(reference: str) -> str:
+    match = re.match(r"[A-Za-z]+", reference)
+    return match.group(0).upper() if match else ""
 
-    The complete search export is a checklist for catalogue lookup, not a
-    purchase-ready cart. Full source fields stay in *_review.csv.
-    """
-    if item.part:
+
+def russian_nominal(value: str, family: str) -> str:
+    """Convert only evident KiCad nominal units; do not infer electrical specs."""
+    compact = value.strip().replace("µ", "u").replace("μ", "u")
+    if family == "R":
+        match = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*([kKmM]?)", compact)
+        if match:
+            unit = {"": "Ом", "k": "кОм", "m": "МОм"}[match.group(2).lower()]
+            return match.group(1).replace(".", ",") + " " + unit
+    if family == "C":
+        match = re.match(r"^(\d+(?:[.,]\d+)?)\s*(p|n|u|m)?F(?=\s|$)", compact, flags=re.I)
+        if match:
+            unit = {"p": "пФ", "n": "нФ", "u": "мкФ", "m": "мФ", None: "Ф"}[match.group(2).lower() if match.group(2) else None]
+            return match.group(1).replace(".", ",") + " " + unit
+    if family == "L":
+        match = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*(n|u|m)?H", compact, flags=re.I)
+        if match:
+            unit = {"n": "нГн", "u": "мкГн", "m": "мГн", None: "Гн"}[match.group(2).lower() if match.group(2) else None]
+            return match.group(1).replace(".", ",") + " " + unit
+    return value.strip()
+
+
+def footprint_hint(footprint: str) -> str:
+    match = re.search(r"(?:^|[_:])(?:R|C|L)_(0201|0402|0603|0805|1206|1210|1812|2010|2512)(?:_|$)", footprint)
+    if match:
+        return match.group(1)
+    for pattern in (r"LQFP-\d+", r"TQFP-\d+", r"SOIC-\d+", r"SOT-\d+(?:-\d+)?", r"DIP-\d+", r"SMA(?:F)?", r"SMB", r"SMC", r"HC49-U"):
+        match = re.search(pattern, footprint, flags=re.I)
+        if match:
+            return match.group(0).upper()
+    return ""
+
+
+def search_query(item: BomItem) -> str:
+    """Human-readable LOOKUP phrase. It is not a supplier part number."""
+    if item.part and item.status in {"explicit", "mapped"}:
         return validate_part(item.part)
+    fam = family_of(item.reference)
     value = validate_part(item.value)
-    footprint = item.footprint.split(":", 1)[-1].strip()
-    package = package_code(item.footprint)
-    family_match = re.match(r"[A-Za-z]+", item.reference)
-    family = family_match.group(0).upper() if family_match else ""
-    if package and family in {"R", "C", "L", "Y"}:
-        # Value + 0805/1206 is sufficient to start catalogue searching; it
-        # does not imply voltage/power/tolerance are known.
-        return validate_part(f"{value} {package}")
-    readable_footprint = re.sub(r"[_]+", " ", footprint)
-    if readable_footprint and family in {"J", "TP"}:
-        # J labels typically name a net (CAN, POWER, etc), not the product.
-        return validate_part(readable_footprint)
-    if readable_footprint and value:
-        return validate_part(f"{value} {readable_footprint}")
-    return validate_part(value or readable_footprint or item.reference)
+    fp = item.footprint
+    package = footprint_hint(fp)
+    if fam == "R":
+        nominal = russian_nominal(value, "R")
+        kind = "резистор-перемычка SMD" if nominal == "0 Ом" else "резистор SMD"
+        return validate_part(f"{kind} {nominal} {package}")
+    if fam == "C":
+        nominal = russian_nominal(value, "C")
+        voltage = re.search(r"(?:^|\s)(\d+(?:[.,]\d+)?)\s*[Vv](?:\b|$)", value)
+        voltage_part = (f" {voltage.group(1)} В" if voltage else "")
+        if "CP_Radial" in fp or "C_Radial" in fp:
+            dimensions = re.search(r"D(\d+(?:[.,]\d+)?)mm_P(\d+(?:[.,]\d+)?)mm", fp)
+            dim = (f" диаметр {dimensions.group(1)} мм шаг {dimensions.group(2)} мм" if dimensions else "")
+            return validate_part(f"конденсатор электролитический {nominal}{voltage_part}{dim}")
+        return validate_part(f"конденсатор керамический SMD {nominal}{voltage_part} {package}")
+    if fam == "L":
+        kind = "ферритовая бусина" if value.upper().startswith("BLM") else "дроссель"
+        if item.part and item.status == "candidate":
+            return validate_part(f"{kind} {item.part} {package}")
+        return validate_part(f"{kind} {russian_nominal(value, 'L')} {package or ('ANR5045' if 'ANR5045' in fp else '')}")
+    if fam == "TP":
+        # May be a footprint-only test point; never claim it must be populated.
+        return "контакт тестовый штыревой 1x01 шаг 2,54 мм"
+    if fam == "J":
+        connector = fp.split(":", 1)[-1]
+        known = re.search(r"(PhoenixContact_(?:G?MSTBA)_2,5_[234]-G|JST_XH_B2B-XH-A)", connector)
+        if known:
+            name = known.group(1).replace("_", " ")
+        elif "IDC-Header" in connector:
+            name = "разъём IDC штыревой"
+        else:
+            name = "разъём штыревой"
+        positions = re.search(r"(\d+x\d+)", connector)
+        pitch = re.search(r"P(\d+(?:[.,]\d+)?)mm", connector)
+        direction = "вертикальный" if "Vertical" in connector else ""
+        return validate_part(" ".join(x for x in (name, positions.group(1) if positions else "", f"шаг {pitch.group(1)} мм" if pitch else "", direction) if x))
+    if fam == "K":
+        if "SANYOU" in value.upper() or "SANYOU" in fp.upper():
+            return "реле SANYOU SRD SPDT напряжение катушки уточнить"
+        return validate_part(f"реле {value}")
+    if fam == "SW":
+        if "RotaryEncoder" in value or "PEC11R" in fp:
+            m = re.search(r"PEC11R-\d+[A-Za-z0-9-]*", fp)
+            candidate = m.group(0).removesuffix("-0-0-0") if m else value
+            return validate_part(f"энкодер механический {candidate}")
+        return "кнопка тактовая 6x6 мм высота 7,3 мм"
+    if fam in {"D", "LED"} and "LED" in value.upper():
+        color = "зелёный" if "LED_G" in value.upper() else "красный" if "LED_R" in value.upper() else "RGB" if "RGB" in fp.upper() else "цвет уточнить"
+        package = "0805" if "0805" in fp else "5 мм 4 вывода" if "D5.0mm-4" in fp else ""
+        return validate_part(f"светодиод {color} {package}")
+    if fam == "BZ":
+        return "зуммер 12x9,5 мм шаг 7,6 мм напряжение уточнить"
+    if fam == "Y":
+        crystal = russian_nominal(value, "L")  # no inference for resonators
+        return validate_part(f"кварцевый резонатор {crystal} {package}")
+    if value.startswith("ACS712x"):
+        return "датчик тока ACS712 30A SOIC-8 вариант уточнить"
+    if value.startswith("STM32F405VGTx"):
+        return "STM32F405VG LQFP-100 точный суффикс уточнить"
+    if item.part and item.status == "candidate":
+        # Add footprint for discrimination, e.g. PC817 DIP-4 versus modules.
+        return validate_part(f"{item.part} {package}" if package else item.part)
+    return validate_part(f"{value} {package}" if package else value or fp.split(':')[-1])
+
+
+def review_note(item: BomItem) -> Tuple[str, str]:
+    """Priority + unresolved parameter(s), without fabricating an MPN."""
+    if item.status in {"explicit", "mapped"}:
+        return "low", "Артикул задан, но совместимость и наличие в ChipDip не проверены"
+    fam = family_of(item.reference)
+    if fam == "TP":
+        return "high", "Уточнить, устанавливается ли физический штырь или это только тестовая точка"
+    if fam == "C":
+        return "medium", "Проверить диэлектрик, допуск, рабочее напряжение и размеры (особенно высоту)"
+    if fam == "R":
+        return "medium", "Проверить мощность, точность, температурный коэффициент и корпус"
+    if fam == "J":
+        return "high", "Требуется заводской артикул и проверка механики, шага, высоты, ответной части"
+    if fam == "K":
+        return "high", "Проверить напряжение катушки, ток контактов, распиновку и посадочное место"
+    if fam == "SW":
+        return "high", "Проверить размеры, посадочное место, распиновку и исполнение"
+    if fam == "BZ":
+        return "high", "Проверить активный/пассивный, напряжение, ток и распиновку"
+    if fam == "L":
+        return "high", "Проверить ток насыщения, DCR, корпус и назначение феррит/дроссель"
+    if fam == "Y":
+        return "high", "Проверить нагрузочную емкость, ESR, корпус и точность"
+    if "x" in item.value and re.search(r"[A-Za-z]\d|\d[A-Za-z]", item.value):
+        return "high", "Уточнить неизвестный символ x в заказном обозначении"
+    if fam == "D" and "LED" in item.value.upper():
+        return "high", "Проверить цвет, яркость, полярность и распиновку"
+    if fam in {"U", "PS", "Q"}:
+        return "high", "Проверить полное заказное обозначение, корпус, функции и параметры"
+    return "medium", "Нужен подтвержденный артикул производителя и сверка с платой"
 
 
 def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
@@ -253,6 +367,7 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
         "candidates": dest / f"{stem}_chipdip_candidates_only.txt",
         "search": dest / f"{stem}_search_all.txt",
         "review": dest / f"{stem}_review.csv",
+        "needs_review": dest / f"{stem}_needs_review.csv",
         "mapping": dest / f"{stem}_mapping_template.csv",
         "summary": dest / f"{stem}_summary.txt",
     }
@@ -298,6 +413,11 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
               + [f"KiCad:{key}" for key in source_columns],
               [[i.reference, i.qty, i.value, i.footprint, i.part, i.status, i.reason, search_query(i), "yes" if i.status in {"explicit", "mapped"} and i.part else "no"]
                + [i.source.get(key, "") for key in source_columns] for i in items])
+    write_csv(paths["needs_review"],
+              ["Reference", "Qty", "Value", "Footprint", "SearchQuery", "Priority", "CheckBeforeOrder", "CandidateMPN", "ConfirmedPartNumber"],
+              [[i.reference, i.qty, i.value, i.footprint, search_query(i),
+                *review_note(i), i.part if i.status == "candidate" else "", ""]
+               for i in items if i.status not in {"explicit", "mapped"}])
     if not paths["mapping"].exists():
         write_csv(paths["mapping"],
                   ["Reference", "Value", "Footprint", "Qty", "Suggested", "PartNumber"],
@@ -327,6 +447,11 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
         "импорта заказной спецификации в ChipDip: есть описания и номиналы.",
         "Подтвердите артикулы в mapping_template.csv, затем повторите запуск с --mapping.",
     ]
+    review_qty = sum(i.qty for i in items if i.status not in {"explicit", "mapped"})
+    high_priority_qty = sum(i.qty for i in items if i.status not in {"explicit", "mapped"} and review_note(i)[0] == "high")
+    lines += [f"Требуют технической проверки: {review_qty} шт.",
+              f"Из них с высоким приоритетом: {high_priority_qty} шт.",
+              "*_needs_review.csv: очередь для подбора артикулов с причинами и приоритетами."]
     if warnings:
         lines.extend(["", "Предупреждения:", *["- " + w for w in warnings]])
     paths["summary"].write_text("\n".join(lines) + "\n", encoding="utf-8")
