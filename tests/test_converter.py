@@ -41,7 +41,9 @@ class BomTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         with tempfile.TemporaryDirectory() as folder:
             paths = write_outputs(Path('test.csv'), items, warnings, Path(folder), False)
-            self.assertEqual(paths['chipdip'].read_text().strip(), 'AMC1301DWVR\t9')
+            self.assertIn('AMC1301DWVR\t9', paths['chipdip'].read_text())
+            self.assertIn('1k 0805\t6', paths['chipdip'].read_text())
+            self.assertEqual(paths['candidates'].read_text().strip(), 'AMC1301DWVR\t9')
             self.assertTrue(paths['mapping'].exists())
 
     def test_mapping_and_no_overwrite(self):
