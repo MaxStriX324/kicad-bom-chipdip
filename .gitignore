@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*_chipdip.txt
+*_review.csv
+*_mapping_template.csv
+*_summary.txt
