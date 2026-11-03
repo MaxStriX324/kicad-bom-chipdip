@@ -1,0 +1,4 @@
+Reference,Qty,Value,Footprint
+"R1,R2",2,1k,Resistor_SMD:R_0805_2012Metric
+U1,1,AMC1301DWVR,Package_SO:SOIC-8
+D1,1,1N4148 NXP,Diode_SMD:D_SOD-123
