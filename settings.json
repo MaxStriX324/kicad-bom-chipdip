@@ -2,5 +2,6 @@
   "boards": 1,
   "include_nominals": false,
   "mapping_file": "",
-  "output_dir": ""
+  "output_dir": "",
+  "auto_mapping": true
 }
