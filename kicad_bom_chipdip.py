@@ -12,7 +12,7 @@ import json
 import re
 import sys
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -35,6 +35,7 @@ class BomItem:
     part: str
     status: str
     reason: str
+    source: Dict[str, str] = field(default_factory=dict)
 
 
 def normalize_header(value: str) -> str:
@@ -190,7 +191,7 @@ def convert(rows: List[Dict[str, str]], mapping_ref: Dict[str, str],
             seen_refs.add(k)
 
         part = validate_part(get(row, "ChipDip", "ChipDip SKU", "ChipDip Part Number",
-                                 "Manufacturer Part Number", "MPN", "PartNumber"))
+                                 "Manufacturer Part Number", "MPN", "MP", "PartNumber"))
         if part:
             status, reason = "explicit", "Артикул указан в поле BOM"
         else:
@@ -206,7 +207,7 @@ def convert(rows: List[Dict[str, str]], mapping_ref: Dict[str, str],
                 status, reason = "mapped", "Артикул взят из пользовательского файла сопоставления"
             else:
                 part, status, reason = classify_value(value, footprint, ref, include_nominals)
-        result.append(BomItem(ref, qty * boards, value, footprint, part, status, reason))
+        result.append(BomItem(ref, qty * boards, value, footprint, part, status, reason, dict(row)))
     return result, warnings
 
 
@@ -241,9 +242,14 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
         for part, qty in grouped.values():
             stream.write(f"{part}\t{qty}\n")
 
+    # Preserve every exported KiCad field in the review, including user-defined
+    # columns (MP, MF, MANUFACTURER, Описание, etc). Unknown columns are harmless.
+    source_columns = list(dict.fromkeys(key for item in items for key in item.source))
     write_csv(paths["review"],
-              ["Reference", "Qty", "Value", "Footprint", "PartNumber", "Status", "Reason"],
-              [[i.reference, i.qty, i.value, i.footprint, i.part, i.status, i.reason] for i in items])
+              ["Reference", "Qty (boards)", "Value", "Footprint", "PartNumber", "Status", "Reason"]
+              + [f"KiCad:{key}" for key in source_columns],
+              [[i.reference, i.qty, i.value, i.footprint, i.part, i.status, i.reason]
+               + [i.source.get(key, "") for key in source_columns] for i in items])
     if not paths["mapping"].exists():
         write_csv(paths["mapping"],
                   ["Reference", "Value", "Footprint", "Qty", "Suggested", "PartNumber"],
@@ -283,8 +289,15 @@ def pick_csv() -> Optional[Path]:
                                               filetypes=[("KiCad BOM", "*.csv"), ("Все файлы", "*.*")])
         root.destroy()
         return Path(selected) if selected else None
-    except Exception as exc:
-        raise ValueError("Графический выбор файла недоступен; укажите путь к CSV аргументом") from exc
+    except Exception:
+        # Some Windows Python distributions omit Tcl/Tk. A console path is
+        # still usable and does not require internet or extra dependencies.
+        print("Окно выбора недоступно. Введите полный путь к CSV файлу:")
+        try:
+            value = input("> ").strip().strip('"')
+        except EOFError:
+            raise ValueError("Укажите путь к файлу: start.bat \"C:\\path\\bom.csv\"")
+        return Path(value) if value else None
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
