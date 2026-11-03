@@ -51,7 +51,8 @@ class ExtendedKiCadTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual((self.root / 'Сборка платы зарядки (версия 2)_chipdip.txt')
                          .read_text(encoding='utf-8').splitlines(),
-                         ['AMC1301DWVR\t2'])
+                         ['AMC1301DWVR\t2', 'конденсатор керамический SMD 100 нФ 0805\t4', 'BAV99 SOT-23\t2'])
+        self.assertEqual((self.root / 'Сборка платы зарядки (версия 2)_chipdip_mpn_only.txt').read_text(encoding='utf-8').strip(), 'AMC1301DWVR\t2')
         self.assertEqual((self.root / 'Сборка платы зарядки (версия 2)_chipdip_candidates_only.txt').read_text(encoding='utf-8').strip(), 'BAV99\t2')
         self.assertEqual((self.root / 'Сборка платы зарядки (версия 2)_search_all.txt').read_text(encoding='utf-8').splitlines(), ['AMC1301DWVR\t2', 'конденсатор керамический SMD 100 нФ 0805\t4', 'BAV99 SOT-23\t2'])
         with (self.root / 'Сборка платы зарядки (версия 2)_review.csv') \
