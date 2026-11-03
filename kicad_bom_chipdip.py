@@ -42,7 +42,7 @@ def normalize_header(value: str) -> str:
     return re.sub(r"[\s_\-]+", "", str(value).strip().casefold())
 
 
-def read_csv_table(path: Path) -> Tuple[List[Dict[str, str]], List[str]]:
+def read_csv_table(path: Path, require_value: bool = True) -> Tuple[List[Dict[str, str]], List[str]]:
     raw = path.read_bytes()
     decoded = None
     for encoding in ("utf-8-sig", "utf-16", "cp1251"):
@@ -53,18 +53,21 @@ def read_csv_table(path: Path) -> Tuple[List[Dict[str, str]], List[str]]:
             continue
     if decoded is None:
         raise ValueError("Не удалось определить кодировку CSV")
-    sample = decoded[:8192]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-        delimiter = dialect.delimiter
-    except csv.Error:
-        delimiter = ","
+    # Determine CSV delimiter from the header, not data: quoted prose fields
+    # may contain many semicolons or commas and confuse csv.Sniffer.
+    import io
+    first_line = decoded.splitlines()[0] if decoded.splitlines() else ""
+    header_columns = {
+        delim: len(next(csv.reader(io.StringIO(first_line), delimiter=delim), []))
+        for delim in (",", ";", "\t")
+    }
+    delimiter = max(header_columns, key=header_columns.get)
     from io import StringIO
     reader = csv.DictReader(StringIO(decoded, newline=""), delimiter=delimiter)
     if reader.fieldnames is None:
         raise ValueError("Пустой CSV")
     columns = {normalize_header(h): h for h in reader.fieldnames if h is not None}
-    if "reference" not in columns or "value" not in columns:
+    if "reference" not in columns or (require_value and "value" not in columns):
         raise ValueError("Нужны колонки Reference и Value (формат KiCad BOM CSV)")
     rows = [{normalize_header(k): (v or "").strip() for k, v in row.items() if k is not None}
             for row in reader if row and any((v or "").strip() for v in row.values())]
@@ -135,7 +138,7 @@ def load_mapping(path: Optional[Path]) -> Tuple[Dict[str, str], Dict[Tuple[str, 
     by_value_footprint: Dict[Tuple[str, str], str] = {}
     if path is None:
         return by_ref, by_value_footprint
-    rows, _ = read_csv_table(path)
+    rows, _ = read_csv_table(path, require_value=False)
     for num, row in enumerate(rows, 2):
         part = validate_part(get(row, "PartNumber", "MPN", "ChipDip", "ChipDip SKU"))
         if not part:
@@ -363,7 +366,8 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
     dest.mkdir(parents=True, exist_ok=True)
     stem = source.stem
     paths = {
-        "chipdip": dest / f"{stem}_chipdip.txt",
+        "chipdip": dest / f"{stem}_chipdip.txt",  # ALL KiCad components, including search descriptions
+        "mpn_only": dest / f"{stem}_chipdip_mpn_only.txt",
         "candidates": dest / f"{stem}_chipdip_candidates_only.txt",
         "search": dest / f"{stem}_search_all.txt",
         "review": dest / f"{stem}_review.csv",
@@ -382,14 +386,15 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
                 grouped[key] = (phrase, quantity)
         return grouped
 
-    # The ChipDip bulk-import form expects part numbers, NOT descriptions or
-    # generic footprints. Import only explicit BOM MPNs or approved mappings.
+    # Human-readable full list and purchase-ready MPNs remain SEPARATE.
+    # The ChipDip importer accepts search phrases but cannot validate them as parts.
     upload_items = [item for item in items if item.status in {"explicit", "mapped"} and item.part]
     candidate_items = [item for item in items if item.status == "candidate" and item.part]
     upload_queries = group_queries([(item.part, item.qty) for item in upload_items])
     candidate_queries = group_queries([(item.part, item.qty) for item in candidate_items])
     all_queries = group_queries([(search_query(item), item.qty) for item in items])
-    for label, grouped in (("chipdip", upload_queries),
+    for label, grouped in (("chipdip", all_queries),
+                           ("mpn_only", upload_queries),
                            ("candidates", candidate_queries),
                            ("search", all_queries)):
         with paths[label].open("w", encoding="utf-8", newline="\n") as stream:
@@ -429,7 +434,8 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
         f"Источник: {source.name}",
         f"Строк BOM к установке: {len(items)}",
         f"Всего компонентов: {total_bom}",
-        f"Для импорта в ChipDip (*_chipdip.txt): {len(upload_queries)} артикулов, {total_upload} шт.",
+        f"ОСНОВНОЙ TXT (*_chipdip.txt): {len(all_queries)} строк, {total_search} шт. из BOM.",
+        f"Подтвержденные MPN (*_chipdip_mpn_only.txt): {len(upload_queries)} артикулов, {total_upload} шт.",
         f"Артикулы-кандидаты (*_chipdip_candidates_only.txt): {len(candidate_queries)} наименований, {total_candidates} шт.",
         f"Нужен подбор артикула: {total_to_choose} шт.",
         f"Полный поисковый список (*_search_all.txt): {len(all_queries)} строк, {total_search} шт.",
@@ -439,12 +445,14 @@ def write_outputs(source: Path, items: List[BomItem], warnings: List[str],
         f"Поисковые фразы по номиналу: {counts['nominal_search']} шт.",
         f"Прочие позиции без MPN: {counts['unresolved']} шт.",
         "",
-        "*_chipdip.txt: ТОЛЬКО явно заданные MPN / принятые сопоставления.",
-        "Даже они не проверены по наличию товара в каталоге ChipDip.",
+        "*_chipdip.txt: ПОЛНАЯ спецификация для поисковой загрузки в ChipDip.",
+        "ВАЖНО: часть строк содержит номиналы/описания, а не артикулы товара.",
+        "Найденные ChipDip совпадения НЕ означают совместимость компонентов.",
+        "*_chipdip_mpn_only.txt: только явно заданные или сопоставленные MPN.",
+        "Даже MPN не проверены по наличию товара в каталоге ChipDip.",
         "*_chipdip_candidates_only.txt: возможные артикулы; нужно проверить",
         "производителя, конкретный вариант, корпус и характеристики.",
-        "*_search_all.txt: все компоненты и количества, но это НЕ файл для",
-        "импорта заказной спецификации в ChipDip: есть описания и номиналы.",
+        "*_search_all.txt: копия полного поискового списка (совместимость с v5).",
         "Подтвердите артикулы в mapping_template.csv, затем повторите запуск с --mapping.",
     ]
     review_qty = sum(i.qty for i in items if i.status not in {"explicit", "mapped"})
@@ -484,7 +492,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="KiCad CSV BOM → текстовый список ChipDip")
     parser.add_argument("input", nargs="?", type=Path, help="CSV BOM; без аргумента откроется окно выбора")
     parser.add_argument("--boards", type=int, help="Количество одинаковых плат (перекрывает settings.json)")
-    parser.add_argument("--mapping", type=Path, help="CSV с Reference/Value/Footprint/PartNumber")
+    parser.add_argument("--mapping", type=Path, help="CSV соответствий; без аргумента ищем файл рядом с BOM")
+    parser.add_argument("--no-auto-mapping", action="store_true", help="Не искать рядом с BOM *._mapping.csv")
     parser.add_argument("--out", type=Path, help="Каталог результатов (по умолчанию рядом с входным CSV)")
     parser.add_argument("--include-nominals", action="store_true", default=None,
                         help="Добавить номиналы с известным SMD-корпусом как поисковые фразы (не MPN)")
@@ -519,6 +528,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not path.is_file():
             raise ValueError(f"Нет такого CSV: {path}")
         rows, _ = read_csv_table(path)
+        if mapping is None and not args.no_auto_mapping and settings.get("auto_mapping", True):
+            for suffix in ("_mapping.csv", "_mapping_template.csv"):
+                candidate = path.with_name(path.stem + suffix)
+                if candidate.is_file():
+                    mapping = candidate
+                    break
+        if mapping is not None:
+            if not mapping.is_file():
+                raise ValueError(f"Файл соответствий не найден: {mapping}")
+            print(f"Соответствия: {mapping}")
+        else:
+            print("Соответствия: не найдены; неизвестные позиции получат поисковое описание")
         mapping_ref, mapping_value = load_mapping(mapping)
         items, warnings = convert(rows, mapping_ref, mapping_value, boards,
                                   include_nominals)
@@ -527,6 +548,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("\n".join([f"Готово. Исходных строк: {len(rows)}"] +
                         [f"  {key}: {dest}" for key, dest in outputs.items()]))
         print(outputs["summary"].read_text(encoding="utf-8"))
+        print(f"ОСНОВНОЙ ФАЙЛ: {outputs['chipdip']}")
         return 0
     except (OSError, ValueError, TypeError, json.JSONDecodeError, csv.Error) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
