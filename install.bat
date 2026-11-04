@@ -2,12 +2,14 @@
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 set "PYTHONUTF8=1"
+set "NO_PAUSE=0"
+if /i "%~1"=="/quiet" set "NO_PAUSE=1"
 set "VENV_PY=%~dp0.venv\Scripts\python.exe"
 title KiCad BOM to ChipDip - install
 pushd "%~dp0"
 if errorlevel 1 (
   echo ERROR: Cannot access the project directory.
-  pause
+  if "%NO_PAUSE%"=="0" pause
   exit /b 1
 )
 
@@ -46,29 +48,48 @@ echo No third-party Python packages are needed.
 echo INSTALLATION COMPLETE. Use start.bat to select ANY KiCad CSV.
 echo You can also drag a CSV onto start.bat.
 popd
-pause
+if "%NO_PAUSE%"=="0" pause
 exit /b 0
 
 :ensure_venv
 if exist "%VENV_PY%" (
-  "%VENV_PY%" -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" >nul 2>&1
+  "%VENV_PY%" -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix and sys.version_info >= (3, 9) else 1)" >nul 2>nul
+  if not errorlevel 1 exit /b 0
+)
+if exist "%~dp0.venv" (
+  echo Broken Python environment found. Removing old .venv...
+  rmdir /s /q "%~dp0.venv"
+  if exist "%~dp0.venv" exit /b 1
+)
+call :try_python py -3.14
+if not errorlevel 1 exit /b 0
+call :try_python py -3.13
+if not errorlevel 1 exit /b 0
+call :try_python py -3
+if not errorlevel 1 exit /b 0
+call :try_python python
+if not errorlevel 1 exit /b 0
+if exist "%LocalAppData%\Programs\Python\Python314\python.exe" (
+  call :try_python "%LocalAppData%\Programs\Python\Python314\python.exe"
   if not errorlevel 1 exit /b 0
 )
 if exist "%LocalAppData%\Programs\Python\Python313\python.exe" (
-  "%LocalAppData%\Programs\Python\Python313\python.exe" -m venv "%~dp0.venv"
-  if not errorlevel 1 exit /b 0
-)
-py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" >nul 2>&1
-if not errorlevel 1 (
-  py -3 -m venv "%~dp0.venv"
-  if not errorlevel 1 exit /b 0
-)
-python -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" >nul 2>&1
-if not errorlevel 1 (
-  python -m venv "%~dp0.venv"
+  call :try_python "%LocalAppData%\Programs\Python\Python313\python.exe"
   if not errorlevel 1 exit /b 0
 )
 exit /b 1
+
+:try_python
+if exist "%~dp0.venv" (
+  rmdir /s /q "%~dp0.venv" >nul 2>nul
+  if exist "%~dp0.venv" exit /b 1
+)
+%* -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" >nul 2>nul
+if errorlevel 1 exit /b 1
+%* -m venv "%~dp0.venv" >nul 2>nul
+if errorlevel 1 exit /b 1
+"%VENV_PY%" -c "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 1)" >nul 2>nul
+exit /b %errorlevel%
 
 :manual_python
 echo.
@@ -78,5 +99,5 @@ echo Enable Tcl/Tk and then run install.bat again.
 :failed
 echo INSTALLATION FAILED.
 popd
-pause
+if "%NO_PAUSE%"=="0" pause
 exit /b 1
